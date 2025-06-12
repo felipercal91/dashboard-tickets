@@ -20,7 +20,7 @@ if archivo is not None:
     total = df[df['Estado'] == 'Resuelto'].shape[0]
     promedio = df['Días_Resolución'].mean()
 
-    st.metric("✅ Tickets Resueltos", total)
+    st.metric("✅ Tickets Resueltoss", total)
     st.metric("⏱️ Tiempo Promedio Resolución (días)", f"{promedio:.2f}")
 
     # Gráfico 1: Tickets por Estado
