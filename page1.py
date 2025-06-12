@@ -18,7 +18,7 @@ if archivo is not None:
 
     # KPIs
     total = df[df['Estado'] == 'Resuelto'].shape[0]
-    promedio = df['Días_Resolución'].mean()
+    promedio = df['Días_Resolucións'].mean()
 
     st.metric("✅ Tickets Resueltoss", total)
     st.metric("⏱️ Tiempo Promedio Resolución (días)", f"{promedio:.2f}")
