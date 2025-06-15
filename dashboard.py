@@ -2,127 +2,166 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
-from datetime import datetime, timedelta, time
+from PIL import Image
+from io import BytesIO
+from datetime import time
+from pandas.tseries.offsets import CustomBusinessHour
 
-st.set_page_config(layout="wide")
-st.title("📊 Dashboard de Mesa de Ayuda - Confianza Colombia")
+st.set_page_config(layout="wide", page_title="Dashboard Confianza Colombia")
 
-# 📁 Cargar archivo
-archivo = st.file_uploader("Sube el archivo Excel", type=["xlsx"])
+# Logo
+logo = Image.open("logo_confianza.png")
+col_logo, col_title = st.columns([1, 5])
+with col_logo:
+    st.image(logo, width=100)
+with col_title:
+    st.markdown("<h1 style='color:white;'>Dashboard de Tickets – Confianza Colombia</h1>", unsafe_allow_html=True)
 
-@st.cache_data
-def cargar_datos(file):
-    df = pd.read_excel(file)
+# Selector de página
+pagina = st.sidebar.radio("📂 Selecciona una página", ["📊 Resumen Ejecutivo", "📈 Análisis Detallado"])
 
-    # Convertir columnas a fechas
-    columnas_fecha = [
-        'fecha de apertura', 'fecha de asignacion', 'fecha en curso',
-        'fecha en pausa', 'fecha termino pausa', 'fecha de finalizacion'
-    ]
-    for col in columnas_fecha:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors='coerce')
+# Cargar archivo
+archivo = st.file_uploader("📥 Carga tu archivo Excel", type=["xlsx"])
 
-    # Calcular horas hábiles entre fechas
-    def calcular_horas_habiles(row):
-        inicio = row['fecha en curso']
-        fin = row['fecha de finalizacion']
-        pausa_ini = row.get('fecha en pausa')
-        pausa_fin = row.get('fecha termino pausa')
-        if pd.isnull(inicio) or pd.isnull(fin):
-            return np.nan
+if archivo is not None:
+    df = pd.read_excel(archivo)
+    df.columns = df.columns.str.strip().str.lower()
 
-        rangos = [(inicio, fin)]
-        if not pd.isnull(pausa_ini):
-            if not pd.isnull(pausa_fin):
-                rangos = [(inicio, pausa_ini), (pausa_fin, fin)]
-            else:
-                rangos = [(inicio, pausa_ini)]
+    # Asegurar nombres consistentes
+    columnas_necesarias = ["fecha de apertura", "fecha en curso", "fecha en pausa",
+                           "fecha termino pausa", "fecha de finalizacion", "estado",
+                           "responsable", "priodidad confianza", "descripcion",
+                           "n° ticket", "solicitante"]
 
-        total = 0
-        for inicio_rango, fin_rango in rangos:
-            current = inicio_rango
-            while current < fin_rango:
-                if current.weekday() < 5:
-                    inicio_hora = max(current, datetime.combine(current.date(), time(9, 0)))
-                    fin_hora = min(fin_rango, datetime.combine(current.date(), time(18, 0)))
-                    delta = (fin_hora - inicio_hora).total_seconds() / 3600
-                    if delta > 0:
-                        total += delta
-                current += timedelta(days=1)
-        return round(total, 2)
+    for col in columnas_necesarias:
+        if col not in df.columns:
+            st.error(f"❌ Falta la columna requerida: '{col}'")
+            st.stop()
 
-    df["horas resolución real (hábiles)"] = df.apply(calcular_horas_habiles, axis=1)
+    fechas = ["fecha de apertura", "fecha en curso", "fecha en pausa", "fecha termino pausa", "fecha de finalizacion"]
+    for col in fechas:
+        df[col] = pd.to_datetime(df[col], errors='coerce')
 
-    # Alertas SLA
-    df["alerta"] = df["horas resolución real (hábiles)"].apply(
-        lambda x: "🔴 Más de 16h" if x > 16 else "🟢 Dentro del límite"
-    )
+    # Cálculo de horas hábiles
+    business_hours = CustomBusinessHour(start="09:00", end="18:00", weekmask='Mon Tue Wed Thu Fri')
 
-    # Visual de prioridad
-    df["prioridad visual"] = df["priodidad confianza"].map({
-        "Alta": "🔴 Alta", "Mediana": "🟠 Media", "Baja": "🟢 Baja"
-    }).fillna(df["priodidad confianza"])
+    def en_horario(dt):
+        return pd.notna(dt) and dt.weekday() < 5 and time(9, 0) <= dt.time() <= time(18, 0)
 
-    # Columnas para filtros y gráficos
-    df["mes"] = df["fecha de finalizacion"].dt.strftime("%Y-%m")
-    df["semana"] = df["fecha de finalizacion"].dt.strftime("%Y-%W")
-    df["cumple_sla"] = np.where(df["horas resolución real (hábiles)"] <= 16, "✅ Cumple SLA", "❌ No Cumple")
+    def calcular_horas_real(row):
+        inicio = row["fecha en curso"]
+        fin = row["fecha de finalizacion"]
+        pausa_ini = row["fecha en pausa"]
+        pausa_fin = row["fecha termino pausa"]
 
-    return df
+        if pd.isna(inicio) or pd.isna(fin):
+            return None
 
-# 🚀 Si hay archivo cargado
-if archivo:
-    df = cargar_datos(archivo)
-    st.dataframe(df)
+        total_horas = 0
+        if pd.isna(pausa_ini):
+            total_horas = len(pd.date_range(start=inicio, end=fin, freq=business_hours))
+        elif not pd.isna(pausa_ini) and not pd.isna(pausa_fin):
+            total_horas += len(pd.date_range(start=inicio, end=pausa_ini, freq=business_hours))
+            total_horas += len(pd.date_range(start=pausa_fin, end=fin, freq=business_hours))
+        elif not pd.isna(pausa_ini) and pd.isna(pausa_fin):
+            total_horas = len(pd.date_range(start=inicio, end=pausa_ini, freq=business_hours))
 
-    # 📊 Gráfico 1: Tickets por estado y mes de finalización
-    fig_estado_mes = px.bar(
-        df.groupby(["mes", "estado"]).size().reset_index(name="Cantidad"),
-        x="mes", y="Cantidad", color="estado", barmode="group",
-        title="📅 Tickets por Estado y Mes de Finalización"
-    )
-    st.plotly_chart(fig_estado_mes, use_container_width=True)
+        return total_horas if total_horas > 0 else None
 
-    # 📊 Gráfico 2: Promedio resolución por prioridad
-    fig_resolucion = px.bar(
-        df.groupby("prioridad visual")["horas resolución real (hábiles)"].mean().reset_index(),
-        x="prioridad visual", y="horas resolución real (hábiles)",
-        color="prioridad visual", title="⏱ Promedio de Resolución por Prioridad de Confianza"
-    )
-    st.plotly_chart(fig_resolucion, use_container_width=True)
+    df["horas resolución real (hábiles)"] = df.apply(calcular_horas_real, axis=1)
+    df["Alerta"] = np.where(df["horas resolución real (hábiles)"] > 16, "🔴 Más de 16h", "🟢 Dentro del límite")
 
-    # 📊 Gráfico 3: Tickets por responsable
-    fig_responsables = px.bar(
-        df["responsable"].value_counts().reset_index(),
-        x="index", y="responsable",
-        labels={"index": "Responsable", "responsable": "Cantidad de Tickets"},
-        title="👨‍💻 Tickets por Responsable"
-    )
-    st.plotly_chart(fig_responsables, use_container_width=True)
+    # Visualización de prioridad
+    colores_prioridad = {'Alta': '🔴 Alta', 'Media': '🟠 Media', 'Baja': '🟢 Baja'}
+    df["Prioridad Visual"] = df["priodidad confianza"].map(colores_prioridad)
 
-    # 📊 Gráfico 4: Distribución por dificultad
-    fig_dificultad = px.pie(
-        df["dificultad"].value_counts().reset_index(),
-        names="index", values="dificultad",
-        title="📊 Distribución por Dificultad"
-    )
-    st.plotly_chart(fig_dificultad, use_container_width=True)
+    # Mes y semana
+    df["mes_finalizacion"] = df["fecha de finalizacion"].dt.strftime("%B")
+    df["mes"] = df["fecha de finalizacion"].dt.strftime('%b')
 
-    # 📊 Gráfico 5: Tickets por semana y estado
-    st.subheader("📆 Tickets por Semana y Estado")
-    fig_estado_semanal = px.bar(
-        df.groupby(["semana", "estado"]).size().reset_index(name="Cantidad"),
-        x="semana", y="Cantidad", color="estado",
-        category_orders={"semana": sorted(df["semana"].unique())}
-    )
-    st.plotly_chart(fig_estado_semanal, use_container_width=True)
+    # Filtros
+    st.sidebar.header("🔍 Filtros")
+    mes_sel = st.sidebar.multiselect("📆 Mes de Finalización", df["mes_finalizacion"].dropna().unique(), default=df["mes_finalizacion"].dropna().unique())
+    estado = st.sidebar.multiselect("Estado", df["estado"].dropna().unique(), default=df["estado"].dropna().unique())
+    responsable = st.sidebar.multiselect("Responsable", df["responsable"].dropna().unique(), default=df["responsable"].dropna().unique())
+    dificultad = st.sidebar.multiselect("Dificultad", df["dificultad"].dropna().unique() if "dificultad" in df.columns else [], default=None)
+    prioridad = st.sidebar.multiselect("Prioridad Confianza", df["priodidad confianza"].dropna().unique(), default=df["priodidad confianza"].dropna().unique())
 
-    # 📊 Gráfico 6: Cumplimiento de SLA por semana
-    st.subheader("✅ Cumplimiento de SLA (<16h) por Semana")
-    fig_sla = px.bar(
-        df.groupby(["semana", "cumple_sla"]).size().reset_index(name="Cantidad"),
-        x="semana", y="Cantidad", color="cumple_sla", barmode="group",
-        category_orders={"semana": sorted(df["semana"].unique())}
-    )
-    st.plotly_chart(fig_sla, use_container_width=True)
+    df = df[df["mes_finalizacion"].isin(mes_sel) & df["estado"].isin(estado) &
+            df["responsable"].isin(responsable) & df["priodidad confianza"].isin(prioridad)]
+
+    # Gráficos comunes
+    orden_meses = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
+    df["mes"] = pd.Categorical(df["mes"], categories=orden_meses, ordered=True)
+
+    if pagina == "📊 Resumen Ejecutivo":
+        col1, col2, col3 = st.columns(3)
+        col1.metric("📌 Tickets Resueltos", df[df["estado"].str.lower() == "resuelto"].shape[0])
+        col2.metric("⏱ Prom. Resolución real (hrs)", f"{df['horas resolución real (hábiles)'].mean():.1f}")
+        col3.metric("🧑‍💼 Técnicos únicos", df["responsable"].nunique())
+
+        col4, col5 = st.columns(2)
+
+        with col4:
+            resumen = df.groupby(['mes', 'estado']).size().reset_index(name='Cantidad').sort_values(by='mes')
+            fig = px.bar(resumen, x='mes', y='Cantidad', color='estado', barmode='group',
+                         title="📅 Tickets por Estado y Mes de Finalización")
+            fig.update_layout(plot_bgcolor='#0e1117', paper_bgcolor='#0e1117', font_color='white')
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col5:
+            resolucion = df.groupby("priodidad confianza")["horas resolución real (hábiles)"].mean().reset_index()
+            fig2 = px.bar(resolucion, x="priodidad confianza", y="horas resolución real (hábiles)",
+                          color="priodidad confianza", text_auto=".1f",
+                          title="⏱️ Resolución Promedio por Prioridad Confianza")
+            fig2.update_layout(plot_bgcolor='#0e1117', paper_bgcolor='#0e1117', font_color='white')
+            st.plotly_chart(fig2, use_container_width=True)
+
+    elif pagina == "📈 Análisis Detallado":
+        st.subheader("📊 Tickets Resueltos por Semana del Mes")
+        df_sem = df[df["estado"].str.lower() == "resuelto"].copy()
+        df_sem["mes_anio"] = df_sem["fecha de finalizacion"].dt.strftime("%Y-%m")
+        df_sem["nro_semana_mes"] = df_sem.groupby("mes_anio")["fecha de finalizacion"].transform(lambda x: (x.dt.day - 1) // 7 + 1)
+        df_sem["semana_mes_label"] = "Semana " + df_sem["nro_semana_mes"].astype(str)
+        grafico = df_sem.groupby(["mes_anio", "semana_mes_label"]).size().reset_index(name="Cantidad de Tickets")
+        grafico["semana_num"] = grafico["semana_mes_label"].str.extract(r'(\d+)').astype(int)
+        grafico = grafico.sort_values(by=["mes_anio", "semana_num"])
+
+        fig3 = px.bar(
+            grafico, x="semana_num", y="Cantidad de Tickets", color="mes_anio",
+            text_auto=True, barmode='group',
+            title="📈 Tickets Resueltos por Semana del Mes",
+            labels={"semana_num": "Semana", "Cantidad de Tickets": "Tickets"}
+        )
+        fig3.update_layout(
+            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white",
+            xaxis=dict(tickmode='array', tickvals=grafico["semana_num"], ticktext=grafico["semana_mes_label"])
+        )
+        st.plotly_chart(fig3, use_container_width=True)
+
+        # Gráfico por responsable
+        st.subheader("👨‍💻 Tickets por Responsable")
+        df_resp = df["responsable"].value_counts().reset_index()
+        df_resp.columns = ["Responsable", "Tickets"]
+        fig_resp = px.bar(df_resp, x="Responsable", y="Tickets", title="👨‍💻 Tickets por Responsable")
+        fig_resp.update_layout(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white")
+        st.plotly_chart(fig_resp, use_container_width=True)
+
+        # Tabla de datos
+        st.subheader("📄 Tabla de Tickets con Alerta")
+        st.dataframe(df[[
+            "n° ticket", "solicitante", "fecha de apertura", "fecha en curso", "fecha en pausa",
+            "fecha termino pausa", "fecha de finalizacion", "estado", "responsable",
+            "priodidad confianza", "Prioridad Visual", "horas resolución real (hábiles)", "Alerta", "descripcion"
+        ]])
+
+        def convertir_excel(df):
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                df.to_excel(writer, index=False, sheet_name='Filtrados')
+            return output.getvalue()
+
+        st.download_button("📤 Descargar Excel", convertir_excel(df), file_name="reporte_confianza.xlsx")
+
+else:
+    st.info("📂 Carga un archivo Excel con columnas como 'fecha en curso', 'fecha de finalizacion', 'responsable', etc.")
