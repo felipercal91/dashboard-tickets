@@ -21,13 +21,12 @@ with col_title:
 pagina = st.sidebar.radio("📂 Selecciona una página", ["📊 Resumen Ejecutivo", "📈 Análisis Detallado"])
 
 # Cargar archivo
-archivo = st.file_uploader("📥 Carga tu archivo Excel", type=["xlsx"])
+archivo = st.file_uploader("📅 Carga tu archivo Excel", type=["xlsx"])
 
 if archivo is not None:
     df = pd.read_excel(archivo)
     df.columns = df.columns.str.strip().str.lower()
 
-    # Asegurar nombres consistentes
     columnas_necesarias = ["fecha de apertura", "fecha en curso", "fecha en pausa",
                            "fecha termino pausa", "fecha de finalizacion", "estado",
                            "responsable", "priodidad confianza", "descripcion",
@@ -42,11 +41,7 @@ if archivo is not None:
     for col in fechas:
         df[col] = pd.to_datetime(df[col], errors='coerce')
 
-    # Cálculo de horas hábiles
     business_hours = CustomBusinessHour(start="09:00", end="18:00", weekmask='Mon Tue Wed Thu Fri')
-
-    def en_horario(dt):
-        return pd.notna(dt) and dt.weekday() < 5 and time(9, 0) <= dt.time() <= time(18, 0)
 
     def calcular_horas_real(row):
         inicio = row["fecha en curso"]
@@ -69,17 +64,32 @@ if archivo is not None:
         return total_horas if total_horas > 0 else None
 
     df["horas resolución real (hábiles)"] = df.apply(calcular_horas_real, axis=1)
-    df["Alerta"] = np.where(df["horas resolución real (hábiles)"] > 16, "🔴 Más de 16h", "🟢 Dentro del límite")
 
-    # Visualización de prioridad
-    colores_prioridad = {'Alta': '🔴 Alta', 'Media': '🟠 Media', 'Baja': '🟢 Baja'}
+    # Reemplazar "Media" por "Mediana"
+    df["priodidad confianza"] = df["priodidad confianza"].replace({"Media": "Mediana"})
+
+    colores_prioridad = {'Alta': '🔴 Alta', 'Mediana': '🟠 Mediana', 'Baja': '🟢 Baja', 'Muy Urgente': '🔴 Muy Urgente'}
     df["Prioridad Visual"] = df["priodidad confianza"].map(colores_prioridad)
 
-    # Mes y semana
+    # SLA según prioridad
+    sla_map = {
+        'Muy Urgente': 2,
+        'Alta': 4,
+        'Mediana': 8,
+        'Baja': 16
+    }
+    df["SLA Prioridad"] = df["priodidad confianza"].map(lambda x: f"{sla_map.get(x, '?')} Horas")
+
+    # Nueva alerta basada en SLA
+    df["Alerta"] = df.apply(
+        lambda row: "🟢 Dentro del SLA" if pd.notna(row["horas resolución real (hábiles)"]) and row["horas resolución real (hábiles)"] <= sla_map.get(row["priodidad confianza"], 0)
+        else ("🔴 Fuera del SLA" if pd.notna(row["horas resolución real (hábiles)"]) else None),
+        axis=1
+    )
+
     df["mes_finalizacion"] = df["fecha de finalizacion"].dt.strftime("%B")
     df["mes"] = df["fecha de finalizacion"].dt.strftime('%b')
 
-    # Filtros
     st.sidebar.header("🔍 Filtros")
     mes_sel = st.sidebar.multiselect("📆 Mes de Finalización", df["mes_finalizacion"].dropna().unique(), default=df["mes_finalizacion"].dropna().unique())
     estado = st.sidebar.multiselect("Estado", df["estado"].dropna().unique(), default=df["estado"].dropna().unique())
@@ -90,7 +100,6 @@ if archivo is not None:
     df = df[df["mes_finalizacion"].isin(mes_sel) & df["estado"].isin(estado) &
             df["responsable"].isin(responsable) & df["priodidad confianza"].isin(prioridad)]
 
-    # Gráficos comunes
     orden_meses = ['Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic']
     df["mes"] = pd.Categorical(df["mes"], categories=orden_meses, ordered=True)
 
@@ -100,8 +109,14 @@ if archivo is not None:
         col2.metric("⏱ Prom. Resolución real (hrs)", f"{df['horas resolución real (hábiles)'].mean():.1f}")
         col3.metric("🧑‍💼 Técnicos únicos", df["responsable"].nunique())
 
-        col4, col5 = st.columns(2)
+        df_resueltos = df[df["estado"].str.lower() == "resuelto"].copy()
+        if not df_resueltos.empty:
+            total_tickets = df_resueltos.shape[0]
+            dias_unicos = df_resueltos["fecha de finalizacion"].dt.date.nunique()
+            responsables_unicos = df_resueltos["responsable"].nunique()
+            tickets_dia_responsable = total_tickets / dias_unicos / responsables_unicos if dias_unicos > 0 and responsables_unicos > 0 else 0
 
+        col4, col5 = st.columns(2)
         with col4:
             resumen = df.groupby(['mes', 'estado']).size().reset_index(name='Cantidad').sort_values(by='mes')
             fig = px.bar(resumen, x='mes', y='Cantidad', color='estado', barmode='group',
@@ -117,43 +132,25 @@ if archivo is not None:
             fig2.update_layout(plot_bgcolor='#0e1117', paper_bgcolor='#0e1117', font_color='white')
             st.plotly_chart(fig2, use_container_width=True)
 
+        st.markdown("""
+            <div style='display: flex; justify-content: center; margin-top: 30px;'>
+                <div style='background-color: #1c1c1c; padding: 20px; border-radius: 12px; box-shadow: 0 0 10px rgba(255,255,255,0.1); width: 300px; text-align: center;'>
+                    <h4 style='color: white;'>📅 Tickets/día/responsable</h4>
+                    <p style='font-size: 36px; color: #00d4ff; margin: 0;'>
+                        {0:.2f}
+                    </p>
+                </div>
+            </div>
+        """.format(tickets_dia_responsable), unsafe_allow_html=True)
+
     elif pagina == "📈 Análisis Detallado":
-        st.subheader("📊 Tickets Resueltos por Semana del Mes")
-        df_sem = df[df["estado"].str.lower() == "resuelto"].copy()
-        df_sem["mes_anio"] = df_sem["fecha de finalizacion"].dt.strftime("%Y-%m")
-        df_sem["nro_semana_mes"] = df_sem.groupby("mes_anio")["fecha de finalizacion"].transform(lambda x: (x.dt.day - 1) // 7 + 1)
-        df_sem["semana_mes_label"] = "Semana " + df_sem["nro_semana_mes"].astype(str)
-        grafico = df_sem.groupby(["mes_anio", "semana_mes_label"]).size().reset_index(name="Cantidad de Tickets")
-        grafico["semana_num"] = grafico["semana_mes_label"].str.extract(r'(\d+)').astype(int)
-        grafico = grafico.sort_values(by=["mes_anio", "semana_num"])
-
-        fig3 = px.bar(
-            grafico, x="semana_num", y="Cantidad de Tickets", color="mes_anio",
-            text_auto=True, barmode='group',
-            title="📈 Tickets Resueltos por Semana del Mes",
-            labels={"semana_num": "Semana", "Cantidad de Tickets": "Tickets"}
-        )
-        fig3.update_layout(
-            plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white",
-            xaxis=dict(tickmode='array', tickvals=grafico["semana_num"], ticktext=grafico["semana_mes_label"])
-        )
-        st.plotly_chart(fig3, use_container_width=True)
-
-        # Gráfico por responsable
-        st.subheader("👨‍💻 Tickets por Responsable")
-        df_resp = df["responsable"].value_counts().reset_index()
-        df_resp.columns = ["Responsable", "Tickets"]
-        fig_resp = px.bar(df_resp, x="Responsable", y="Tickets", title="👨‍💻 Tickets por Responsable")
-        fig_resp.update_layout(plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font_color="white")
-        st.plotly_chart(fig_resp, use_container_width=True)
-
-        # Tabla de datos
         st.subheader("📄 Tabla de Tickets con Alerta")
-        st.dataframe(df[[
+        columnas_tabla = [
             "n° ticket", "solicitante", "fecha de apertura", "fecha en curso", "fecha en pausa",
             "fecha termino pausa", "fecha de finalizacion", "estado", "responsable",
-            "priodidad confianza", "Prioridad Visual", "horas resolución real (hábiles)", "Alerta", "descripcion"
-        ]])
+            "priodidad confianza", "SLA Prioridad", "Prioridad Visual", "horas resolución real (hábiles)", "Alerta", "descripcion"
+        ]
+        st.dataframe(df[columnas_tabla])
 
         def convertir_excel(df):
             output = BytesIO()
@@ -161,7 +158,7 @@ if archivo is not None:
                 df.to_excel(writer, index=False, sheet_name='Filtrados')
             return output.getvalue()
 
-        st.download_button("📤 Descargar Excel", convertir_excel(df), file_name="reporte_confianza.xlsx")
+        st.download_button("📄 Descargar Excel", convertir_excel(df), file_name="reporte_confianza.xlsx")
 
 else:
     st.info("📂 Carga un archivo Excel con columnas como 'fecha en curso', 'fecha de finalizacion', 'responsable', etc.")
